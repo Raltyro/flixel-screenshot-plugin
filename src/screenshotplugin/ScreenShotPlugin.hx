@@ -1,87 +1,137 @@
 package screenshotplugin;
 
-import openfl.utils.ByteArray;
-import openfl.display.Sprite;
-import flixel.tweens.FlxTween;
-import flixel.FlxG;
+import sys.io.File;
+import sys.FileSystem;
+
 import openfl.display.Bitmap;
 import openfl.display.BitmapData;
+import openfl.display.Sprite;
+import openfl.events.KeyboardEvent;
+import openfl.events.Event;
 import openfl.geom.Rectangle;
 import openfl.geom.Matrix;
+import openfl.utils.ByteArray;
+
+import flixel.input.keyboard.FlxKey;
+import flixel.tweens.FlxTween;
+#if FLX_SOUND_SYSTEM
+import flixel.system.FlxAssets;
+#end
+import flixel.FlxBasic;
+import flixel.FlxG;
 
 using StringTools;
 
-@:sound("embed/screenshot.wav") @:allow(ScreenShotPlugin) class ScreenshotSound extends openfl.media.Sound {}
+class ScreenShotPlugin extends FlxBasic {
+	public static var screenshotSprites:Array<ScreenShotSprite> = [];
+	public static var poolScreenshotSprites:Array<ScreenShotSprite> = [];
+	public static var screenshotKeys:Array<FlxKey> = [FlxKey.F2];
+	public static var screenshotDirectory:String = "./screenshots/";
+	public static var screenshotSound:String = "embed/screenshot.wav";
+	public static var screenshotScale:Float = .2;
+	public static var screenshotDelay:Float = .5;
 
-class ScreenShotPlugin extends flixel.FlxBasic {
-    private static var initialized:Bool = false;
-    private var container:Sprite;
-    private var flashSprite:Sprite;
-    private var flashBitmap:Bitmap;
-    private var screenshotSprite:Sprite;
-    private var shotDisplayBitmap:Bitmap;
-    private var outlineBitmap:Bitmap;
-    override public function new():Void {
-        super();
-        if (initialized) {
-            FlxG.plugins.remove(this);
-            destroy();
-            return;
-        }
-        initialized = true;
-        container = new Sprite();
-        FlxG.stage.addChild(container);
-        flashSprite = new Sprite();
-        flashSprite.alpha = 0;
-        flashBitmap = new Bitmap(new BitmapData(FlxG.width, FlxG.height, true, 0xFFFFFFFF));
-        flashSprite.addChild(flashBitmap);
-        screenshotSprite = new Sprite();
-        screenshotSprite.alpha = 0;
-        container.addChild(screenshotSprite);
-        outlineBitmap = new Bitmap(new BitmapData(Std.int(FlxG.width / 5) + 10, Std.int(FlxG.height / 5) + 10, true, 0xffffffff));
-        outlineBitmap.x = 5;
-        outlineBitmap.y = 5;
-        screenshotSprite.addChild(outlineBitmap);
-        shotDisplayBitmap = new Bitmap();
-        shotDisplayBitmap.scaleX /= 5;
-        shotDisplayBitmap.scaleY /= 5;
-        screenshotSprite.addChild(shotDisplayBitmap);
-        container.addChild(flashSprite);
-        @:privateAccess openfl.Lib.application.window.onResize.add((w, h) -> {
-            flashBitmap.bitmapData = new BitmapData(w, h, true, 0xFFFFFFFF);
-            outlineBitmap.bitmapData = new BitmapData(Std.int(w / 5) + 10, Std.int(h / 5) + 10, true, 0xffffffff);
-        });
-    }
-    
-    private var inProgress:Bool = false;
-    override public function update(elapsed:Float):Void {
-        if (FlxG.keys.justPressed.F2 && !inProgress) {
-            inProgress = true;
-            screenshot();
-        }
-    }
+	private static var lastScreenshotTime:Float = 0;
+	private static var initialized:Bool = false;
 
-    private function screenshot():Void {
-        var bounds:Rectangle = new Rectangle(0, 0, FlxG.stage.stageWidth, FlxG.stage.stageHeight);
-        var shot:Bitmap = new Bitmap(new BitmapData(Math.floor(bounds.width), Math.floor(bounds.height), true, 0));
-        var m:Matrix = new Matrix(1, 0, 0, 1, -bounds.x, -bounds.y);
-        shot.bitmapData.draw(FlxG.stage, m);
-        var png:ByteArray = shot.bitmapData.encode(bounds, new openfl.display.PNGEncoderOptions());
-        png.position = 0;
-        var path = "screenshots/Screenshot " + Date.now().toString().split(":").join("-") + ".png";
-        var x:String = png.readUTFBytes(png.length - 1);
-        if (!sys.FileSystem.exists("./screenshots/"))
-            sys.FileSystem.createDirectory("./screenshots/");
-        sys.io.File.saveContent(path, x);
-        FlxG.sound.play(new ScreenshotSound());
-        flashSprite.alpha = 1;
-        FlxTween.tween(flashSprite, {alpha: 0}, 0.25);
-        shotDisplayBitmap.bitmapData = shot.bitmapData;
-        shotDisplayBitmap.x = outlineBitmap.x + 5;
-        shotDisplayBitmap.y = outlineBitmap.y + 5;
-        screenshotSprite.alpha = 1;
-        FlxTween.tween(screenshotSprite, {alpha: 0}, 0.5, {onComplete: (t) -> {
-            inProgress = false;
-        }, startDelay: .5});
-    }
+	private var container:Sprite;
+	private var flashSprite:Sprite;
+	private var flashBitmap:Bitmap;
+	private var screenshotSprite:Sprite;
+	private var outlineBitmap:Bitmap;
+	private var shotDisplayBitmap:Bitmap;
+	private var flashTween:FlxTween;
+
+	public function new() {
+		super();
+
+		if (initialized) {
+			FlxG.plugins.remove(this);
+			destroy();
+			return;
+		}
+		initialized = true;
+
+		container = new Sprite();
+
+		flashSprite = new Sprite();
+		flashSprite.alpha = 0;
+
+		flashSprite.addChild(flashBitmap = new Bitmap(new BitmapData(1, 1, false, 0xFFFFFFFF)));
+		container.addChild(flashSprite);
+
+		FlxG.stage.addChild(container);
+		FlxG.stage.addEventListener(Event.RESIZE, onResize);
+		FlxG.stage.addEventListener(KeyboardEvent.KEY_DOWN, handleInput);
+		onResize();
+	}
+
+	public function capture():Void {
+		if (!FileSystem.exists(screenshotDirectory)) FileSystem.createDirectory(screenshotDirectory);
+
+		#if FLX_SOUND_SYSTEM
+		var sound = FlxAssets.getSound(screenshotSound);
+		if (sound != null)
+			FlxG.sound.load(sound).play();
+		#end
+
+		var width:Int = FlxG.stage.stageWidth;
+		var height:Int = FlxG.stage.stageHeight;
+
+		var bounds:Rectangle = new Rectangle(0, 0, width, height);
+		var shot:BitmapData = new BitmapData(width, height, true, 0);
+        shot.draw(FlxG.stage, new Matrix(1, 0, 0, 1, -bounds.x, -bounds.y));
+
+		var png:ByteArray = shot.encode(bounds, new openfl.display.PNGEncoderOptions());
+		File.saveContent('$screenshotDirectory/Screenshot${Date.now().toString().split(":").join("-")}.png', png.toString());
+		png.clear();
+
+		var sprite:ScreenShotSprite = poolScreenshotSprites.pop();
+		if (sprite == null) sprite = new ScreenShotSprite();
+		container.addChild(sprite.setDisplay(shot, screenshotScale));
+		screenshotSprites.push(sprite);
+
+		flashSprite.alpha = .8;
+
+		sprite.x = sprite.y = 3;
+		sprite.alpha = 1;
+
+		if (flashTween != null) flashTween.cancel();
+		flashTween = FlxTween.tween(flashSprite, {alpha: 0}, 0.2);
+		FlxTween.tween(sprite, {alpha: 0.5}, 3, {onComplete: (_) -> {
+			FlxTween.tween(sprite, {y: -sprite.height}, 0.1, {onComplete: (_) -> {
+				container.removeChild(sprite);
+				poolScreenshotSprites.push(sprite);
+				sprite.dispose();
+			}});
+		}});
+	}
+
+	function handleInput(evt:KeyboardEvent) {
+		@:privateAccess if (screenshotKeys.contains(FlxKey.toStringMap.get(evt.keyCode))) {
+			var now:Float = Sys.time();
+			if (now > lastScreenshotTime + screenshotDelay) {
+				lastScreenshotTime = now;
+				capture();
+			}
+		}
+	}
+
+	function onResize(?_) {
+		var width:Int = FlxG.stage.stageWidth;
+		var height:Int = FlxG.stage.stageHeight;
+
+		flashBitmap.scaleX = width;
+		flashBitmap.scaleY = height;
+	}
+
+	@:allow(screenshotplugin.ScreenShotSprite)
+	private static function disposeBitmap(bitmap:BitmapData) {
+		if (bitmap == null) return;
+
+		bitmap.lock();
+		@:privateAccess if (bitmap.__texture != null) bitmap.__texture.dispose();
+		if (bitmap.image != null) bitmap.image.data = null;
+		bitmap.disposeImage();
+	}
 }
